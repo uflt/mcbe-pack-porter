@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""GUI: перетащи пак в окно. Два режима: смена описания и перенос Java <-> Bedrock."""
+"""GUI: перетащи пак в окно. Режимы: -> Bedrock, -> Java, только смена описания."""
 import os
 import subprocess
 import sys
@@ -23,10 +23,13 @@ BORDER_HOVER = "#ffd23f"
 FONT = "Segoe UI"
 
 TEXTS = {
-    "desc": ("Перетащите .mcpack сюда", "или нажмите, чтобы выбрать файл"),
-    "port": ("Перетащите пак для переноса",
-             "Java ⇄ Bedrock определяется сам: .zip, .mcpack или папка"),
+    "bedrock": ("Перетащите Java-пак сюда",
+                "Java (.zip или папка) → Bedrock .mcpack, описание ставится моё"),
+    "java": ("Перетащите Bedrock-пак сюда",
+             "Bedrock (.mcpack) → Java .zip, описание ставится моё"),
+    "desc": ("Перетащите .mcpack сюда", "описание пака поменяется на моё"),
 }
+MODES = (("bedrock", "→ Bedrock"), ("java", "→ Java"), ("desc", "Только описание"))
 
 
 def resource_path(rel: str) -> Path:
@@ -63,7 +66,7 @@ class App:
 
         self.busy = False
         self.last_dir = None
-        self.mode = tk.StringVar(value="desc")
+        self.mode = tk.StringVar(value="bedrock")
         self.bg = ImageTk.PhotoImage(make_background())
 
         self.canvas = tk.Canvas(self.root, width=W, height=H, highlightthickness=0,
@@ -74,12 +77,14 @@ class App:
                                      tags="border")
 
         cx = W // 2
-        self.text(cx, 66, TEXTS["desc"][0], 22, "bold", tag="title")
-        self.text(cx, 98, TEXTS["desc"][1], 12, tag="subtitle")
+        title, sub = TEXTS["bedrock"]
+        self.text(cx, 66, title, 22, "bold", tag="title")
+        self.text(cx, 98, sub, 11, tag="subtitle")
         self.status_id = self.text(cx, 478, "Готов к работе", 12, color="#dddddd",
                                    outline=False)
         self.build_mode_switch(cx, 128)
         self.build_controls()
+        self.on_mode()
 
         self.canvas.bind("<Button-1>", self.on_click)
         for w in (self.root, self.canvas, self.bar, self.mode_bar):
@@ -106,45 +111,50 @@ class App:
     def build_mode_switch(self, cx, y):
         bg = "#101010"
         self.mode_bar = tk.Frame(self.root, bg=bg)
-        for value, label in (("desc", "Сменить описание"), ("port", "Перенос Java ⇄ Bedrock")):
+        for value, label in MODES:
             tk.Radiobutton(self.mode_bar, text=label, value=value, variable=self.mode,
                            indicatoron=False, command=self.on_mode, bg="#2a2a2a", fg="white",
                            selectcolor="#c77d00", activebackground="#3a3a3a",
                            activeforeground="white", font=(FONT, 10, "bold"),
-                           padx=12, pady=3, bd=0, relief="flat", cursor="hand2"
+                           padx=14, pady=3, bd=0, relief="flat", cursor="hand2"
                            ).pack(side="left", padx=2)
         self.canvas.create_window(cx, y, window=self.mode_bar)
 
     def build_controls(self):
         bg = "#101010"
         self.bar = tk.Frame(self.root, bg=bg)
-        self.opts = tk.Frame(self.bar, bg=bg)
-        self.opts.pack(side="left")
 
-        # --- опции режима "описание"
-        self.desc_opts = tk.Frame(self.opts, bg=bg)
-        tk.Label(self.desc_opts, text="Цвет:", bg=bg, fg="white",
+        # цвет описания — во всех режимах
+        tk.Label(self.bar, text="Цвет:", bg=bg, fg="white",
                  font=(FONT, 10)).pack(side="left", padx=(0, 4))
         self.color = tk.StringVar(value="Радуга")
-        ttk.Combobox(self.desc_opts, textvariable=self.color, values=list(core.COLORS),
+        ttk.Combobox(self.bar, textvariable=self.color, values=list(core.COLORS),
                      state="readonly", width=9).pack(side="left", padx=(0, 10))
+
+        # дополнительные опции — зависят от режима
+        self.extra = tk.Frame(self.bar, bg=bg)
+        self.extra.pack(side="left")
+
+        self.extra_desc = tk.Frame(self.extra, bg=bg)
         self.bump = tk.BooleanVar(value=True)
-        tk.Checkbutton(self.desc_opts, text="Повысить версию", variable=self.bump, bg=bg,
+        tk.Checkbutton(self.extra_desc, text="Повысить версию", variable=self.bump, bg=bg,
                        fg="white", selectcolor="#333333", activebackground=bg,
                        activeforeground="white", font=(FONT, 10)).pack(side="left")
 
-        # --- опции режима "перенос"
-        self.port_opts = tk.Frame(self.opts, bg=bg)
-        tk.Label(self.port_opts, text="Версия Java:", bg=bg, fg="white",
-                 font=(FONT, 10)).pack(side="left", padx=(0, 4))
-        self.java_ver = tk.StringVar(value=porter.DEFAULT_VERSION)
-        ttk.Combobox(self.port_opts, textvariable=self.java_ver,
-                     values=list(porter.JAVA_VERSIONS), state="readonly",
-                     width=7).pack(side="left", padx=(0, 10))
-        tk.Button(self.port_opts, text="Выбрать папку…", command=self.pick_folder,
+        self.extra_bedrock = tk.Frame(self.extra, bg=bg)
+        tk.Button(self.extra_bedrock, text="Папка…", command=self.pick_folder,
                   font=(FONT, 10)).pack(side="left")
 
-        self.desc_opts.pack()
+        self.extra_java = tk.Frame(self.extra, bg=bg)
+        tk.Label(self.extra_java, text="Java:", bg=bg, fg="white",
+                 font=(FONT, 10)).pack(side="left", padx=(0, 4))
+        self.java_ver = tk.StringVar(value=porter.DEFAULT_VERSION)
+        ttk.Combobox(self.extra_java, textvariable=self.java_ver,
+                     values=list(porter.JAVA_VERSIONS), state="readonly",
+                     width=8).pack(side="left", padx=(0, 8))
+        tk.Button(self.extra_java, text="Папка…", command=self.pick_folder,
+                  font=(FONT, 10)).pack(side="left")
+
         self.open_btn = tk.Button(self.bar, text="Открыть папку", state="disabled",
                                   command=self.open_folder, font=(FONT, 10))
         self.open_btn.pack(side="left", padx=(10, 0))
@@ -155,8 +165,10 @@ class App:
         title, sub = TEXTS[mode]
         self.canvas.itemconfig("title", text=title)
         self.canvas.itemconfig("subtitle", text=sub)
-        (self.port_opts if mode == "desc" else self.desc_opts).pack_forget()
-        (self.desc_opts if mode == "desc" else self.port_opts).pack()
+        for f in (self.extra_desc, self.extra_bedrock, self.extra_java):
+            f.pack_forget()
+        {"desc": self.extra_desc, "bedrock": self.extra_bedrock,
+         "java": self.extra_java}[mode].pack()
         self.set_status("Готов к работе")
 
     def set_status(self, s, color="#dddddd"):
@@ -200,6 +212,7 @@ class App:
         self.set_status("Обработка…", "#ffd23f")
         mode = self.mode.get()
         color, bump, ver = self.color.get(), self.bump.get(), self.java_ver.get()
+        description = core.build_description(color, True)  # моё описание — всегда
         results, state = [], {"done": False}
 
         def work():
@@ -209,7 +222,7 @@ class App:
                         dst = core.process(p, color, True, bump)
                         results.append((Path(p), dst, None, None))
                     else:
-                        res = porter.port_pack(p, ver)
+                        res = porter.port_pack(p, mode, ver, description)
                         results.append((Path(p), res.dst, None, res))
                 except Exception as e:  # noqa: BLE001
                     results.append((Path(p), None, str(e), None))
@@ -231,7 +244,7 @@ class App:
         if ok and not bad:
             if len(ok) > 1:
                 msg = f"✓ Готово: обработано файлов — {len(ok)}"
-            elif mode == "port":
+            elif mode != "desc":
                 res = ok[0][3]
                 msg = f"✓ {res.direction}: {res.dst.name} ({res.converted} текстур)"
             else:

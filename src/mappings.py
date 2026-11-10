@@ -127,7 +127,8 @@ ITEMS_EXTRA = {
     "wheat_seeds": "seeds_wheat", "pumpkin_seeds": "seeds_pumpkin",
     "melon_seeds": "seeds_melon", "beetroot_seeds": "seeds_beetroot",
     "glass_bottle": "potion_bottle_empty", "potion": "potion_bottle_drinkable",
-    "splash_potion": "potion_bottle_splash", "totem_of_undying": "totem",
+    "splash_potion": "potion_bottle_splash", "lingering_potion": "potion_bottle_lingering",
+    "totem_of_undying": "totem",
     "scute": "turtle_shell_piece", "firework_rocket": "fireworks",
     "firework_star": "fireworks_charge",
     "minecart": "minecart_normal", "chest_minecart": "minecart_chest",
@@ -155,6 +156,28 @@ ARMOR = {
     "leather": "leather", "chainmail": "chain", "iron": "iron",
     "gold": "gold", "diamond": "diamond", "netherite": "netherite",
     "turtle": "turtle",
+}
+
+
+# Интерфейс (HUD): Bedrock textures/ui/<ключ>.png <-> Java gui/sprites/hud/<значение>.png
+# Хотбар (hotbar_0..8 + крайние части) собирается отдельно в porter.py.
+UI_BEDROCK_TO_JAVA = {
+    "cross_hair": "crosshair",
+    "selected_hotbar_slot": "hotbar_selection",
+    "armor_full": "armor_full", "armor_half": "armor_half", "armor_empty": "armor_empty",
+    "food_full": "food_full", "food_half": "food_half", "food_empty": "food_empty",
+    "heart": "heart/full", "heart_half": "heart/half", "heart_background": "heart/container",
+    "bubble": "air", "bubble_pop": "air_bursting",
+    "experience_bar_empty": "experience_bar_background",
+    "experience_bar_full": "experience_bar_progress",
+}
+
+# Зелья: в Java это 2 слоя (бутылка + окрашиваемая жидкость potion_overlay),
+# в Bedrock — готовые цельные текстуры.
+POTIONS_JAVA_TO_BEDROCK = {
+    "potion": "potion_bottle_drinkable",
+    "splash_potion": "potion_bottle_splash",
+    "lingering_potion": "potion_bottle_lingering",
 }
 
 
@@ -211,3 +234,4 @@ JAVA_TO_BEDROCK_ITEMS = _build_items()
 BEDROCK_TO_JAVA_BLOCKS = _invert(JAVA_TO_BEDROCK_BLOCKS)
 BEDROCK_TO_JAVA_ITEMS = _invert(JAVA_TO_BEDROCK_ITEMS)
 BEDROCK_TO_JAVA_ARMOR = {v: k for k, v in ARMOR.items()}
+UI_JAVA_TO_BEDROCK = _invert(UI_BEDROCK_TO_JAVA)

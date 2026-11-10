@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Портирование ресурс-паков Java <-> Bedrock (только текстуры и метаданные).
+Портирование ресурс-паков Java <-> Bedrock (текстуры и метаданные).
 
-Что переносится:
-  блоки, предметы, мобы (entity), окружение (солнце/луна/облака), цвета травы/листвы,
-  броня, иконка и описание пака.
-Что НЕ переносится: звуки, интерфейс (GUI), частицы, модели, шрифты, шейдеры, языки.
+Переносится: блоки, предметы, мобы (entity), солнце/луна/облака, цвета травы и листвы,
+броня, зелья, HUD (прицел, хотбар, сердца, еда, броня, воздух, опыт), иконка и описание.
+НЕ переносится: звуки, инвентарь/контейнеры, меню, частицы, модели, шрифты, шейдеры,
+кубическое небо (skybox: в обычной Java его нет).
 
-Edition определяется автоматически: pack.mcmeta -> Java, manifest.json -> Bedrock.
-Принимает .zip / .mcpack или распакованную папку.
+Принимает .zip / .mcpack или распакованную папку. Направление задаётся явно (target).
 """
 import io
 import json
@@ -23,18 +22,30 @@ from PIL import Image
 
 import mappings as mp
 
-# метка версии -> (pack_format, использовать min_format/max_format как в 1.21.9+)
+# Целевые версии Java:
+#   fmt    - pack_format (ресурспак)
+#   ranged - писать min_format/max_format (так с 1.21.9)
+#   legacy - старая раскладка до 1.13: textures/blocks, textures/items (имена как в Bedrock)
+#   armor  - "old": cloth_1/chain_1/iron_1...   "layer": leather_layer_1/chainmail_layer_1...
 JAVA_VERSIONS = {
-    "1.20.1": (15, False),
-    "1.21.1": (34, False),
-    "1.21.4": (46, False),
-    "1.21.8": (64, False),
-    "26.1": (84, True),
+    "1.7.10": {"fmt": 1, "legacy": True, "armor": "old"},
+    "1.8.9": {"fmt": 1, "legacy": True, "armor": "layer"},
+    "1.16.5": {"fmt": 6},
+    "1.21.4": {"fmt": 46},
+    "1.21.11": {"fmt": 75, "ranged": True},
+    "26.3": {"fmt": 97, "ranged": True},
 }
-DEFAULT_VERSION = "26.1"
-EQUIPMENT_FORMAT = 42  # с этого формата броня лежит в entity/equipment/...
+DEFAULT_VERSION = "1.21.4"
+HUD_FORMAT = 18         # с этого формата (1.20.2) HUD — отдельные спрайты, раньше общий атлас
+EQUIPMENT_FORMAT = 42   # с этого формата броня лежит в entity/equipment/...
+ITEM_DEFS_FORMAT = 46   # с этого формата (1.21.4) есть assets/minecraft/items/*.json
 
 TEX = "assets/minecraft/textures/"
+HUD = "gui/sprites/hud/"
+WATER = (56, 93, 198)   # цвет воды в бутылке (стандартный тон жидкости)
+HOTBAR_NAMES = ["hotbar_start_cap"] + [f"hotbar_{i}" for i in range(9)] + ["hotbar_end_cap"]
+
+EDITION_NAMES = {"java": "Java", "bedrock": "Bedrock"}
 
 
 @dataclass
@@ -42,7 +53,7 @@ class PortResult:
     dst: Path
     direction: str
     converted: int = 0                       # сколько текстур перенесено
-    renamed: int = 0                         # из них переименовано по таблице
+    renamed: int = 0                         # из них переименовано/собрано по таблице
     cropped: int = 0                         # анимации, сохранённые первым кадром
     passthrough: list = field(default_factory=list)   # перенесены под тем же именем
     skipped: dict = field(default_factory=dict)       # папка -> число файлов
@@ -50,10 +61,11 @@ class PortResult:
     notes: list = field(default_factory=list)
     report: Path = None
 
-    def skip(self, rel: str):
-        parts = rel.split("/")
-        n = 4 if rel.startswith(TEX) else 3
-        key = "/".join(parts[:n]) if len(parts) > n else "/".join(parts[:-1]) or rel
+    def skip(self, rel: str, key: str = None):
+        if key is None:
+            parts = rel.split("/")
+            n = 4 if rel.startswith(TEX) else 3
+            key = "/".join(parts[:n]) if len(parts) > n else "/".join(parts[:-1]) or rel
         self.skipped[key] = self.skipped.get(key, 0) + 1
 
 
@@ -106,17 +118,6 @@ class Source:
 
 
 # ---------------------------------------------------------------- утилиты
-def _flatten_text(d):
-    """Описание Java может быть строкой, словарём или списком JSON-компонентов."""
-    if isinstance(d, str):
-        return d
-    if isinstance(d, list):
-        return "".join(_flatten_text(x) for x in d)
-    if isinstance(d, dict):
-        return str(d.get("text", "")) + _flatten_text(d.get("extra", []))
-    return ""
-
-
 def _load_json_loose(raw: bytes):
     text = raw.decode("utf-8-sig")
     try:
@@ -124,6 +125,18 @@ def _load_json_loose(raw: bytes):
     except json.JSONDecodeError:
         text = re.sub(r"(?m)^\s*//.*$", "", text)  # комментарии //
         return json.loads(text)
+
+
+def _png(img: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    img.convert("RGBA").save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _open(data: bytes) -> Image.Image:
+    img = Image.open(io.BytesIO(data))
+    img.load()
+    return img.convert("RGBA")
 
 
 def _image(data: bytes, ext: str, first_frame: bool = False):
@@ -139,9 +152,7 @@ def _image(data: bytes, ext: str, first_frame: bool = False):
         cropped = True
     elif ext == ".png":
         return data, False
-    buf = io.BytesIO()
-    img.convert("RGBA").save(buf, "PNG")
-    return buf.getvalue(), cropped
+    return _png(img), cropped
 
 
 def _write_zip(dst: Path, files: dict):
@@ -153,7 +164,7 @@ def _write_zip(dst: Path, files: dict):
 def _write_report(res: PortResult):
     lines = [f"Порт пака: {res.direction}", f"Результат: {res.dst.name}", "",
              f"Текстур перенесено: {res.converted}",
-             f"  переименовано по таблице: {res.renamed}",
+             f"  переименовано/собрано по таблице: {res.renamed}",
              f"  перенесено под тем же именем: {len(res.passthrough)}",
              f"  анимаций сохранено первым кадром: {res.cropped}", ""]
     if res.notes:
@@ -170,19 +181,56 @@ def _write_report(res: PortResult):
     res.report.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _slice_hotbar(data: bytes) -> dict:
+    """Java hotbar.png (182x22 * k) -> Bedrock: крайние части 1 px и 9 ячеек по 20 px."""
+    img = _open(data)
+    w, h = img.size
+    if w % 182:
+        raise ValueError(f"hotbar.png: ширина {w} не кратна 182")
+    s = w // 182
+    parts = {"hotbar_start_cap": img.crop((0, 0, s, h)),
+             "hotbar_end_cap": img.crop((w - s, 0, w, h))}
+    for i in range(9):
+        x0 = s + i * 20 * s
+        parts[f"hotbar_{i}"] = img.crop((x0, 0, x0 + 20 * s, h))
+    return {k: _png(v) for k, v in parts.items()}
+
+
+def _compose_hotbar(pieces: dict) -> bytes:
+    """Bedrock: начало + 9 ячеек + конец -> один hotbar.png для Java."""
+    imgs = [_open(pieces[n]) for n in HOTBAR_NAMES]
+    h = max(i.height for i in imgs)
+    imgs = [i if i.height == h else
+            i.resize((max(1, round(i.width * h / i.height)), h), Image.NEAREST) for i in imgs]
+    out = Image.new("RGBA", (sum(i.width for i in imgs), h))
+    x = 0
+    for i in imgs:
+        out.paste(i, (x, 0))
+        x += i.width
+    return _png(out)
+
+
+def _compose_potion(base: bytes, overlay: bytes = None) -> bytes:
+    """Java (бутылка + окрашиваемая жидкость) -> цельная текстура Bedrock."""
+    b = _open(base)
+    if overlay is None:
+        return _png(b)
+    o = _open(overlay)
+    if o.size != b.size:
+        o = o.resize(b.size, Image.NEAREST)
+    r, g, bl, a = o.split()
+    tinted = Image.merge("RGBA", (r.point(lambda v: v * WATER[0] // 255),
+                                  g.point(lambda v: v * WATER[1] // 255),
+                                  bl.point(lambda v: v * WATER[2] // 255), a))
+    return _png(Image.alpha_composite(tinted, b))
+
+
 # ---------------------------------------------------------------- Java -> Bedrock
-def _java_to_bedrock(src: Source, base: Path) -> PortResult:
+def _java_to_bedrock(src: Source, base: Path, desc: str) -> PortResult:
     dst = base / f"{src.name}_bedrock.mcpack"
     res = PortResult(dst, "Java → Bedrock")
     out = {}
-
-    meta = {}
-    if "pack.mcmeta" in src.files:
-        try:
-            meta = _load_json_loose(src.read("pack.mcmeta"))
-        except Exception:  # noqa: BLE001
-            res.notes.append("pack.mcmeta не удалось прочитать — описание оставлено пустым")
-    desc = _flatten_text(meta.get("pack", {}).get("description", ""))
+    potion_src = {}   # имя -> байты (потом склеиваем бутылку и жидкость)
 
     for rel in sorted(src.files):
         low = rel.lower()
@@ -205,9 +253,12 @@ def _java_to_bedrock(src: Source, base: Path) -> PortResult:
 
         try:
             if top in ("block", "item") and len(parts) == 2:
+                name = parts[1][:-4]
+                if top == "item" and (name in mp.POTIONS_JAVA_TO_BEDROCK or name == "potion_overlay"):
+                    potion_src[name] = src.read(rel)
+                    continue
                 table = mp.JAVA_TO_BEDROCK_BLOCKS if top == "block" else mp.JAVA_TO_BEDROCK_ITEMS
                 folder = "blocks" if top == "block" else "items"
-                name = parts[1][:-4]
                 bname = table.get(name)
                 if bname:
                     res.renamed += 1
@@ -219,13 +270,45 @@ def _java_to_bedrock(src: Source, base: Path) -> PortResult:
                 out[f"textures/{folder}/{bname}.png"] = data
                 res.converted += 1
 
+            elif top in ("blocks", "items") and len(parts) == 2:
+                # старый формат Java (до 1.13): имена те же, что в Bedrock
+                name = parts[1][:-4]
+                legacy_potion = {"potion_bottle_drinkable": "potion",
+                                 "potion_bottle_splash": "splash_potion"}
+                if name == "potion_overlay" or name in legacy_potion:
+                    potion_src[legacy_potion.get(name, name)] = src.read(rel)
+                    continue
+                data, cropped = _image(src.read(rel), ".png", first_frame=True)
+                res.cropped += cropped
+                out[f"textures/{top}/{name}.png"] = data
+                res.converted += 1
+
+            elif sub.startswith(HUD):
+                hud = sub[len(HUD):-4]
+                if hud == "hotbar":
+                    for k, v in _slice_hotbar(src.read(rel)).items():
+                        out[f"textures/ui/{k}.png"] = v
+                    res.converted += 1
+                    res.renamed += 1
+                elif hud in mp.UI_JAVA_TO_BEDROCK:
+                    out[f"textures/ui/{mp.UI_JAVA_TO_BEDROCK[hud]}.png"] = src.read(rel)
+                    res.converted += 1
+                    res.renamed += 1
+                else:
+                    res.skip(rel, "интерфейс (HUD-спрайты без аналога)")
+
             elif sub.startswith("models/armor/"):
-                m = re.fullmatch(r"(\w+?)_layer_([12])", parts[-1][:-4])
+                aname = parts[-1][:-4]
+                m = re.fullmatch(r"(\w+?)_layer_([12])", aname) or re.fullmatch(r"([a-z]+)_([12])", aname)
                 if not m:
                     res.skip(rel)
                     continue
-                mat = mp.ARMOR.get(m.group(1), m.group(1))
-                out[f"textures/models/armor/{mat}_{m.group(2)}.png"] = src.read(rel)
+                jmat, layer = m.group(1), m.group(2)
+                mat = "leather" if jmat == "cloth" else mp.ARMOR.get(jmat, jmat)
+                data = src.read(rel)
+                out[f"textures/models/armor/{mat}_{layer}.png"] = data
+                if mat == "leather":  # у кожаной брони в Bedrock встречается и имя cloth_N
+                    out[f"textures/models/armor/cloth_{layer}.png"] = data
                 res.converted += 1
                 res.renamed += 1
 
@@ -245,6 +328,20 @@ def _java_to_bedrock(src: Source, base: Path) -> PortResult:
         except Exception as e:  # noqa: BLE001
             res.errors.append((rel, str(e)))
 
+    # зелья: склеиваем бутылку и окрашенную жидкость
+    for jname, bname in mp.POTIONS_JAVA_TO_BEDROCK.items():
+        if jname in potion_src:
+            try:
+                out[f"textures/items/{bname}.png"] = _compose_potion(
+                    potion_src[jname], potion_src.get("potion_overlay"))
+                res.converted += 1
+                res.renamed += 1
+            except Exception as e:  # noqa: BLE001
+                res.errors.append((f"item/{jname}.png", str(e)))
+    if potion_src:
+        res.notes.append("Зелья: жидкость окрашена в цвет воды. В Bedrock у каждого эффекта "
+                         "своя цельная текстура, а в Java цвет задаётся игрой.")
+
     if not res.converted:
         raise ValueError("В паке нет поддерживаемых текстур (assets/minecraft/textures/...)")
 
@@ -260,36 +357,20 @@ def _java_to_bedrock(src: Source, base: Path) -> PortResult:
         res.notes.append("Анимированные текстуры (вертикальные ленты) сохранены первым кадром, "
                          "чтобы не растягиваться в Bedrock.")
     res.notes.append("Мобы переносятся по тем же путям, часть текстур может не совпасть по расположению.")
+    res.notes.append("Инвентарь, контейнеры, меню, звуки и частицы не переносятся.")
     _write_zip(dst, out)
     return res
 
 
 # ---------------------------------------------------------------- Bedrock -> Java
-def _resolve_lang(desc: str, src: Source) -> str:
-    """Описание в Bedrock может быть ключом локализации (pack.description)."""
-    if not re.fullmatch(r"[\w.]+", desc or "") or "." not in desc:
-        return desc
-    for rel in src.files:
-        if rel.lower() == "texts/en_us.lang":
-            for line in src.read(rel).decode("utf-8-sig").splitlines():
-                key, sep, val = line.partition("=")
-                if sep and key.strip() == desc:
-                    return val.split("\t#")[0].strip()
-    return desc
-
-
-def _bedrock_to_java(src: Source, base: Path, version_label: str) -> PortResult:
-    fmt, ranged = JAVA_VERSIONS[version_label]
+def _bedrock_to_java(src: Source, base: Path, version_label: str, desc: str) -> PortResult:
+    cfg = JAVA_VERSIONS[version_label]
+    fmt, ranged, legacy = cfg["fmt"], cfg.get("ranged", False), cfg.get("legacy", False)
     dst = base / f"{src.name}_java.zip"
     res = PortResult(dst, f"Bedrock → Java {version_label}")
     out = {}
-
-    desc = ""
-    try:
-        header = _load_json_loose(src.read("manifest.json")).get("header", {})
-        desc = _resolve_lang(str(header.get("description", "")), src)
-    except Exception:  # noqa: BLE001
-        res.notes.append("manifest.json не удалось прочитать — описание оставлено пустым")
+    hotbar = {}          # части хотбара
+    potion_ids = set()   # какие зелья переносили (для моделей без окраски)
 
     for rel in sorted(src.files):
         if rel == "pack_icon.png":
@@ -317,19 +398,45 @@ def _bedrock_to_java(src: Source, base: Path, version_label: str) -> PortResult:
                 out.setdefault(path, data)
 
         try:
-            if top in ("blocks", "items") and len(parts) == 2:
+            if top in ("blocks", "items") and len(parts) == 2 and legacy:
+                # до 1.13 Java использует те же имена, что и Bedrock
+                data, _ = _image(src.read(rel), ext)
+                put(f"{TEX}{top}/{parts[1][: -len(ext)]}.png", data)
+                res.converted += 1
+
+            elif top in ("blocks", "items") and len(parts) == 2:
                 table = mp.BEDROCK_TO_JAVA_BLOCKS if top == "blocks" else mp.BEDROCK_TO_JAVA_ITEMS
                 folder = "block" if top == "blocks" else "item"
                 name = parts[1][: -len(ext)]
                 jname = table.get(name)
+                if top == "items" and not jname and name.startswith("potion_bottle_"):
+                    res.skip(rel, "зелья по эффектам (в Java цвет задаёт игра)")
+                    continue
                 if jname:
                     res.renamed += 1
                 else:
                     jname = name
                     res.passthrough.append(f"{top}/{name}")
+                if top == "items" and jname in mp.POTIONS_JAVA_TO_BEDROCK:
+                    potion_ids.add(jname)
                 data, _ = _image(src.read(rel), ext)
                 put(f"{TEX}{folder}/{jname}.png", data)
                 res.converted += 1
+
+            elif top == "ui" and len(parts) == 2 and fmt < HUD_FORMAT:
+                res.skip(rel, "интерфейс (в этой версии HUD — общий атлас icons/widgets.png)")
+
+            elif top == "ui" and len(parts) == 2:
+                name = parts[1][: -len(ext)]
+                if name in HOTBAR_NAMES:
+                    hotbar[name] = _image(src.read(rel), ext)[0]
+                elif name in mp.UI_BEDROCK_TO_JAVA:
+                    data, _ = _image(src.read(rel), ext)
+                    put(f"{TEX}{HUD}{mp.UI_BEDROCK_TO_JAVA[name]}.png", data)
+                    res.converted += 1
+                    res.renamed += 1
+                else:
+                    res.skip(rel, "интерфейс (инвентарь, меню и др.)")
 
             elif sub.startswith("models/armor/"):
                 m = re.fullmatch(r"([a-z]+)_([12])", parts[-1][: -len(ext)])
@@ -339,12 +446,18 @@ def _bedrock_to_java(src: Source, base: Path, version_label: str) -> PortResult:
                 bmat = "leather" if m.group(1) == "cloth" else m.group(1)
                 jmat = mp.BEDROCK_TO_JAVA_ARMOR.get(bmat, bmat)
                 data, _ = _image(src.read(rel), ext)
-                put(f"{TEX}models/armor/{jmat}_layer_{m.group(2)}.png", data)
+                if cfg.get("armor") == "old":      # 1.7.10: cloth_1, chain_1, iron_1 ...
+                    put(f"{TEX}models/armor/{'cloth' if bmat == 'leather' else bmat}_{m.group(2)}.png", data)
+                else:
+                    put(f"{TEX}models/armor/{jmat}_layer_{m.group(2)}.png", data)
                 if fmt >= EQUIPMENT_FORMAT:
                     sub_dir = "humanoid" if m.group(2) == "1" else "humanoid_leggings"
                     put(f"{TEX}entity/equipment/{sub_dir}/{jmat}.png", data)
                 res.converted += 1
                 res.renamed += 1
+
+            elif top == "environment" and "cubemap" in sub.lower():
+                res.skip(rel, "небо-кубмап (skybox; в обычной Java не поддерживается)")
 
             elif top in ("entity", "environment", "colormap"):
                 data, _ = _image(src.read(rel), ext)
@@ -355,6 +468,37 @@ def _bedrock_to_java(src: Source, base: Path, version_label: str) -> PortResult:
                 res.skip(rel)
         except Exception as e:  # noqa: BLE001
             res.errors.append((rel, str(e)))
+
+    # хотбар: собираем из частей
+    if hotbar:
+        missing = [n for n in HOTBAR_NAMES if n not in hotbar]
+        if missing:
+            res.notes.append("Хотбар не собран, не хватает частей: " + ", ".join(missing))
+        else:
+            try:
+                out[f"{TEX}{HUD}hotbar.png"] = _compose_hotbar(hotbar)
+                res.converted += 1
+                res.renamed += 1
+            except Exception as e:  # noqa: BLE001
+                res.errors.append(("хотбар", str(e)))
+
+    # зелья: без окраски, иначе поверх цельной текстуры Bedrock ложится жидкость Java
+    for jid in sorted(potion_ids if not legacy else []):
+        out[f"assets/minecraft/models/item/{jid}.json"] = json.dumps({
+            "parent": "minecraft:item/generated",
+            "textures": {"layer0": f"minecraft:item/{jid}"}}, indent=2).encode("utf-8")
+        if fmt >= ITEM_DEFS_FORMAT:
+            out[f"assets/minecraft/items/{jid}.json"] = json.dumps({
+                "model": {"type": "minecraft:model",
+                          "model": f"minecraft:item/{jid}"}}, indent=2).encode("utf-8")
+    if potion_ids and not legacy:
+        res.notes.append("Зелья: взяты цельные текстуры Bedrock без окраски — все зелья одного типа "
+                         "выглядят одинаково (в Java цвет эффекта иначе наложится поверх).")
+    if legacy:
+        res.notes.append("Зелья в старых версиях: бутылка берётся из Bedrock, а цветная жидкость "
+                         "рисуется самой игрой поверх, поэтому вид может отличаться.")
+        res.notes.append("В старых версиях имена блоков/предметов почти совпадают с Bedrock, поэтому "
+                         "переносятся как есть. Блоков и предметов, которых нет в этой версии, просто не будет.")
 
     if not res.converted:
         raise ValueError("В паке нет поддерживаемых текстур (textures/...)")
@@ -368,6 +512,13 @@ def _bedrock_to_java(src: Source, base: Path, version_label: str) -> PortResult:
 
     res.notes.append(f"pack_format выставлен для Java {version_label}. Для другой версии "
                      "поправьте число в pack.mcmeta.")
+    if fmt < HUD_FORMAT:
+        res.notes.append("Интерфейс (прицел, хотбар, сердца и т.д.) в этой версии Java хранится в общих "
+                         "атласах gui/icons.png и gui/widgets.png — не переносится.")
+    res.notes.append("Небо: солнце, луна и облака переносятся; кубическое небо в обычной Java "
+                     "не работает (нужны OptiFine/Fabric-моды).")
+    res.notes.append("Инвентарь и контейнеры не переносятся: в Bedrock они собраны из отдельных "
+                     "кусочков, в Java это один атлас.")
     res.notes.append("Анимированные текстуры (flipbook) копируются как есть, без .mcmeta.")
     res.notes.append("Мобы переносятся по тем же путям, часть текстур может не совпасть по расположению.")
     _write_zip(dst, out)
@@ -375,16 +526,25 @@ def _bedrock_to_java(src: Source, base: Path, version_label: str) -> PortResult:
 
 
 # ---------------------------------------------------------------- публичный API
-def port_pack(src_path, version_label: str = DEFAULT_VERSION) -> PortResult:
-    """Определяет edition пака и портирует его в противоположный. Пишет отчёт рядом."""
+def port_pack(src_path, target: str, version_label: str = DEFAULT_VERSION,
+              description: str = "") -> PortResult:
+    """
+    Портирует пак в формат target ("bedrock" или "java").
+    description — описание, которое будет записано в результат (всегда заменяет исходное).
+    Рядом с результатом пишется *_report.txt.
+    """
+    if target not in EDITION_NAMES:
+        raise ValueError("target должен быть 'bedrock' или 'java'")
     src_path = Path(src_path)
     src = Source(src_path)
     try:
+        if src.edition == target:
+            raise ValueError(f"Это уже {EDITION_NAMES[target]}-пак — выберите другое направление")
         base = src_path.parent
-        if src.edition == "java":
-            res = _java_to_bedrock(src, base)
+        if target == "bedrock":
+            res = _java_to_bedrock(src, base, description)
         else:
-            res = _bedrock_to_java(src, base, version_label)
+            res = _bedrock_to_java(src, base, version_label, description)
         _write_report(res)
         return res
     finally:
