@@ -805,6 +805,67 @@ def sky_to_bedrock(files, read):
                 out[f"textures/environment/overworld_cubemap/cubemap_{idx}.png"] = to_png(
                     Image.alpha_composite(bg, face))
             return out
+    return _sky_from_json(files, read)
+
+
+FACE_INDEX = {"north": 0, "east": 1, "south": 2, "west": 3, "top": 4, "up": 4,
+              "bottom": 5, "down": 5}
+
+
+def _resolve_id(ident, files_lower):
+    """'ns:path' или путь -> реальное имя файла в паке."""
+    ident = ident.replace("\\", "/")
+    ns, _, path = ident.partition(":") if ":" in ident else ("minecraft", "", ident)
+    if not path.lower().endswith(".png"):
+        path += ".png"
+    for cand in (f"assets/{ns}/{path}", f"assets/{ns}/textures/{path}", path):
+        real = files_lower.get(cand.lower())
+        if real:
+            return real
+    return None
+
+
+def _cubemap(faces):
+    out = {}
+    for idx, img in faces.items():
+        bg = Image.new("RGBA", img.size, (0, 0, 0, 255))
+        out[f"textures/environment/overworld_cubemap/cubemap_{idx}.png"] = to_png(
+            Image.alpha_composite(bg, img))
+    return out
+
+
+def _sky_from_json(files, read):
+    """FabricSkyBoxes / Nuit (JSON): шесть текстур граней или одна картинка 3x2."""
+    lower = {n.lower(): n for n in files}
+    jsons = [n for n in files if n.lower().endswith(".json") and n.startswith("assets/")
+             and ("sky" in n.lower().split("/")[2] if len(n.split("/")) > 3 else False)]
+    for name in sorted(jsons):
+        try:
+            data = json.loads(read(name).decode("utf-8-sig"))
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(data, dict):
+            continue
+        tex = data.get("textures")
+        if isinstance(tex, dict):
+            faces = {}
+            for k, v in tex.items():
+                idx = FACE_INDEX.get(str(k).lower())
+                real = _resolve_id(v, lower) if idx is not None and isinstance(v, str) else None
+                if real:
+                    faces[idx] = open_img(read(real))
+            if len(faces) == 6:
+                f = max(i.width for i in faces.values())
+                return _cubemap({k: fit(v, f, f) for k, v in faces.items()})
+        single = data.get("texture") or data.get("source")
+        if isinstance(single, str):
+            real = _resolve_id(single, lower)
+            if real:
+                img = open_img(read(real))
+                if abs(img.width * 2 - img.height * 3) <= img.width // 10:
+                    f = img.width // 3
+                    return _cubemap({idx: img.crop((c * f, r * f, (c + 1) * f, (r + 1) * f))
+                                     for idx, c, r in SKY_LAYOUT})
     return {}
 
 
@@ -840,40 +901,58 @@ def _is_outline(px):
     return vv < 0.28 or (ss < 0.18 and vv < 0.9)   # тёмный контур, серое/белое стекло, блик
 
 
+def _lum(px):
+    return 0.299 * px[0] + 0.587 * px[1] + 0.114 * px[2]
+
+
 def _split_potion(base, variants):
-    """Цельная бутылка Bedrock -> (бутылка с дыркой, серая жидкость для окраски игрой)."""
+    """
+    Цельная бутылка Bedrock -> (стекло с дыркой, серая жидкость, которую окрашивает игра).
+    Жидкость — пиксели, цвет которых различается у разных эффектов. Базовая бутылка может
+    быть нарисована пустой: жидкость тогда берётся из вариантов.
+    """
     w, h = base.size
     bp = base.load()
+    vps = [fit(v, w, h).load() for v in variants]
     mask = set()
-    if variants:
-        vps = [fit(v, w, h).load() for v in variants]
-        need = max(1, (len(vps) + 1) // 2)       # меняется хотя бы у половины эффектов
+    if len(vps) >= 2:
         for y in range(h):
             for x in range(w):
-                a = bp[x, y]
-                if not a[3] or _is_outline(a):
+                cols = [vp[x, y] for vp in vps if vp[x, y][3] > 16]
+                if len(cols) < 2 or all(_is_outline(c) for c in cols):
                     continue
-                changed = sum(1 for vp in vps
-                              if sum(abs(a[i] - vp[x, y][i]) for i in range(3)) > 60)
-                if changed >= need:
+                spread = sum(max(c[i] for c in cols) - min(c[i] for c in cols) for i in range(3))
+                if spread > 90:
                     mask.add((x, y))
-    if not mask:   # вариантов нет — ищем «синюю воду»
+    elif len(vps) == 1:
+        vp = vps[0]
         for y in range(h):
             for x in range(w):
-                r, g, b, a = bp[x, y]
-                if a and not _is_outline((r, g, b, a)):
-                    hh, ss, vv = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+                a, b = bp[x, y], vp[x, y]
+                if b[3] > 16 and not _is_outline(b) and (
+                        a[3] < 16 or sum(abs(a[i] - b[i]) for i in range(3)) > 60):
+                    mask.add((x, y))
+    if not mask:   # вариантов нет — ищем «синюю воду» в самой бутылке
+        for y in range(h):
+            for x in range(w):
+                px = bp[x, y]
+                if px[3] and not _is_outline(px):
+                    hh, ss, _ = colorsys.rgb_to_hsv(px[0] / 255, px[1] / 255, px[2] / 255)
                     if 0.53 <= hh <= 0.72 and ss > 0.3:
                         mask.add((x, y))
+        vps = [bp]
+
     bottle = base.copy()
     overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     if mask:
-        lum = {p: 0.299 * bp[p][0] + 0.587 * bp[p][1] + 0.114 * bp[p][2] for p in mask}
-        top = max(lum.values()) or 1
+        # яркость жидкости: среднее по эффектам, нормированное к самому светлому пикселю
+        tops = [max(_lum(vp[p]) for p in mask) or 1 for vp in vps]
         btp, op = bottle.load(), overlay.load()
         for p in mask:
-            g = min(255, round(lum[p] / top * 255))
-            op[p] = (g, g, g, bp[p][3])
+            vals = [_lum(vp[p]) / t for vp, t in zip(vps, tops) if vp[p][3] > 16]
+            g = min(255, round(sum(vals) / len(vals) * 255)) if vals else 255
+            alpha = max(vp[p][3] for vp in vps)
+            op[p] = (g, g, g, alpha)
             btp[p] = (0, 0, 0, 0)
     return bottle, overlay
 
@@ -892,11 +971,13 @@ def potions_to_java(items, cfg, res):
     by_lower = {k.lower(): v for k, v in items.items()}
     overlays = {}
     for jname, bname, prefix, old in POTION_TYPES:
+        variants = [img for k, img in sorted(by_lower.items())
+                    if k.startswith(prefix.lower()) and k[len(prefix):] in _EFFECT_LOWER]
         base = by_lower.get(bname.lower())
         if base is None:
-            continue
-        variants = [img for k, img in by_lower.items()
-                    if k.startswith(prefix.lower()) and k[len(prefix):] in _EFFECT_LOWER]
+            if not variants:
+                continue
+            base = variants[0]
         bottle, overlay = _split_potion(base, variants)
         overlays[jname] = overlay
         if legacy:

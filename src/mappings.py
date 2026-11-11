@@ -159,53 +159,6 @@ ARMOR = {
 }
 
 
-# Интерфейс (HUD): Bedrock textures/ui/<ключ>.png <-> Java gui/sprites/hud/<значение>.png
-# Хотбар (hotbar_0..8 + крайние части) собирается отдельно в porter.py.
-UI_BEDROCK_TO_JAVA = {
-    "cross_hair": "crosshair",
-    "selected_hotbar_slot": "hotbar_selection",
-    "armor_full": "armor_full", "armor_half": "armor_half", "armor_empty": "armor_empty",
-    "food_full": "food_full", "food_half": "food_half", "food_empty": "food_empty",
-    "heart": "heart/full", "heart_half": "heart/half", "heart_background": "heart/container",
-    "bubble": "air", "bubble_pop": "air_bursting",
-    "experience_bar_empty": "experience_bar_background",
-    "experience_bar_full": "experience_bar_progress",
-}
-
-# Зелья: в Java это 2 слоя (бутылка + окрашиваемая жидкость potion_overlay),
-# в Bedrock — готовые цельные текстуры.
-POTIONS_JAVA_TO_BEDROCK = {
-    "potion": "potion_bottle_drinkable",
-    "splash_potion": "potion_bottle_splash",
-    "lingering_potion": "potion_bottle_lingering",
-}
-
-
-# Частицы. Атлас Bedrock textures/particle/particles.png (128x128, 16x16 ячеек) устроен так же,
-# как старый атлас Java до 1.13. В новых версиях Java каждая частица — отдельный файл.
-# имя файла в Java -> (колонка, строка) ячейки атласа.
-def _particle_cells():
-    c = {}
-    for i in range(8):
-        c[f"generic_{i}"] = (i, 0)    # дым, редстоун и т.п. (0 — самая мелкая, 7 — крупная)
-        c[f"effect_{i}"] = (i, 8)     # вихри зелий
-        c[f"spark_{i}"] = (i, 10)     # искры фейерверка
-    for i in range(4):
-        c[f"splash_{i}"] = (3 + i, 1)  # брызги воды
-    c.update({"bubble": (0, 2), "flame": (0, 3), "lava": (1, 3), "note": (0, 4),
-              "heart": (0, 5), "drip_hang": (0, 7), "drip_fall": (1, 7),
-              "drip_land": (2, 7)})
-    return c
-
-
-PARTICLE_CELLS = _particle_cells()
-# частицы удара — в Java-паках их убираем (делаем прозрачными)
-HIT_PARTICLES = ("critical_hit", "enchanted_hit", "damage")
-CRIT_CELL = (1, 4)   # удар/крит в старом атласе (Java до 1.13)
-
-BEDROCK_POTION_FILES = {"potion_bottle_drinkable", "potion_bottle_splash", "potion_bottle_lingering"}
-
-
 def _build_blocks():
     m = {}
     for j, b in COLORS:
@@ -259,4 +212,3 @@ JAVA_TO_BEDROCK_ITEMS = _build_items()
 BEDROCK_TO_JAVA_BLOCKS = _invert(JAVA_TO_BEDROCK_BLOCKS)
 BEDROCK_TO_JAVA_ITEMS = _invert(JAVA_TO_BEDROCK_ITEMS)
 BEDROCK_TO_JAVA_ARMOR = {v: k for k, v in ARMOR.items()}
-UI_JAVA_TO_BEDROCK = _invert(UI_BEDROCK_TO_JAVA)

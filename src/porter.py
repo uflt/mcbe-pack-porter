@@ -60,7 +60,6 @@ class PortResult:
     skipped: dict = field(default_factory=dict)
     errors: list = field(default_factory=list)
     notes: list = field(default_factory=list)
-    report: Path = None
 
     def skip(self, rel: str, key: str = None):
         if key is None:
@@ -141,26 +140,6 @@ def _write_zip(dst: Path, files: dict):
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
         for name, data in files.items():
             z.writestr(name, data)
-
-
-def _write_report(res: PortResult):
-    lines = [f"Порт пака: {res.direction}", f"Результат: {res.dst.name}", "",
-             f"Текстур перенесено: {res.converted}",
-             f"  переименовано/собрано по таблице: {res.renamed}",
-             f"  перенесено под тем же именем: {len(res.passthrough)}",
-             f"  анимаций сохранено первым кадром: {res.cropped}", ""]
-    if res.notes:
-        lines += ["Замечания:"] + [f"  - {n}" for n in res.notes] + [""]
-    if res.skipped:
-        lines += ["Не перенесено:"]
-        lines += [f"  {k}: {v} файл(ов)" for k, v in sorted(res.skipped.items())] + [""]
-    if res.errors:
-        lines += ["Ошибки:"] + [f"  {f}: {e}" for f, e in res.errors] + [""]
-    if res.passthrough:
-        lines += ["Перенесены под тем же именем (проверьте, если что-то не применилось в игре):"]
-        lines += [f"  {p}" for p in sorted(res.passthrough)]
-    res.report = res.dst.with_name(res.dst.stem + "_report.txt")
-    res.report.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _safe(res, label, fn, *a):
@@ -260,7 +239,11 @@ def _java_to_bedrock(src: Source, base: Path, desc: str, mc_dir) -> PortResult:
         out.update(sky)
         res.converted += 1
         res.renamed += 1
-        res.notes.append("Скайбокс OptiFine перенесён в textures/environment/overworld_cubemap.")
+        res.notes.append("Скайбокс перенесён в textures/environment/overworld_cubemap (cubemap_0..5).")
+    else:
+        sky_files = [n for n in src.files if "sky" in n.lower()][:20]
+        res.notes.append("Скайбокс не найден. Файлы со словом «sky» в паке: "
+                         + (", ".join(sky_files) if sky_files else "нет") + ".")
 
     old = None
     for v in OLD_JARS:
@@ -455,7 +438,6 @@ def port_pack(src_path, target: str, version_label: str = DEFAULT_VERSION,
             res = _java_to_bedrock(src, base, description, mc_dir)
         else:
             res = _bedrock_to_java(src, base, version_label, description, mc_dir)
-        _write_report(res)
         return res
     finally:
         src.close()
