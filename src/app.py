@@ -35,18 +35,18 @@ LINK_COL = (138, 200, 255)
 TG_URL, TG_LABEL = "https://t.me/ufltRP", "t.me/ufltRP"
 
 TEXTS = {
-    "bedrock": ("Перетащите Java-пак сюда", "Java .zip или папка » Bedrock .mcpack"),
+    "bedrock": ("Перетащите Java-пак сюда", "Java .zip или папка » .mcpack"),
     "java": ("Перетащите Bedrock-пак сюда", "Bedrock .mcpack » Java .zip"),
-    "desc": ("Перетащите .mcpack сюда", "описание поменяется на ваше"),
+    "desc": ("Перетащите .mcpack сюда", "описание станет вашим"),
 }
-HINT = "  ·  или нажмите на мопса"
-MODES = (("bedrock", "» Bedrock", 128), ("java", "» Java", 112), ("desc", "Только описание", 168))
+HINT = "  ·  или клик по мопсу"
+MODES = (("bedrock", "» Bedrock", 120), ("java", "» Java", 92), ("desc", "Только описание", 196))
 SWATCH = {"Золотой": (255, 170, 0), "Жёлтый": (255, 255, 85), "Красный": (255, 85, 85),
           "Зелёный": (85, 255, 85), "Голубой": (85, 255, 255), "Синий": (85, 85, 255),
           "Розовый": (255, 85, 255)}
 
 ZONE = (20, 20, 580, 520)      # рамка поверх картинки
-TOP = (90, 34, 510, 76)        # капсула с режимами
+TOP = (80, 34, 520, 76)        # капсула с режимами
 TITLE = (40, 424, 560, 504)    # полоса с надписью и статусом
 PANEL = (20, 532, 580, 620)    # нижняя панель: цвет + тгк, настройки режима
 ZONE_R = 26
@@ -86,7 +86,7 @@ def _font():
     return _font_cache["f"]
 
 
-def pixel_text(text, big, k, color, bold=False, shadow=True):
+def pixel_text(text, big, k, color, bold=False, shadow=True, max_w=None):
     """
     Текст как в Minecraft: глиф 8 px без сглаживания, увеличенный блоками (k — размер «пикселя»,
     big — крупный заголовок, на один пиксель крупнее). Жирный — двойная прорисовка со сдвигом
@@ -110,6 +110,11 @@ def pixel_text(text, big, k, color, bold=False, shadow=True):
     for dx, dy in offsets:
         d.text((dx - x0, dy - y0), text, font=font, fill=tuple(color[:3]) + (255,))
     scale = k + 1 if big else k
+    if max_w:
+        while scale > k and w * scale > max_w:      # крупный не влезает — делаем обычным
+            scale -= 1
+        if w * scale > max_w and len(text) > 2:      # мельче не делаем (нечитаемо) — сокращаем
+            return pixel_text(text[:-2].rstrip() + "…", big, k, color, bold, shadow, max_w)
     return img.resize((w * scale, h * scale), Image.NEAREST)
 
 
@@ -307,7 +312,7 @@ class App:
         self.root = TkinterDnD.Tk()
         self.root.withdraw()
         self.s = max(1.0, self.root.winfo_fpixels("1i") / 96)
-        self.k = max(2, round(2 * self.s))           # размер «пикселя» шрифта
+        self.k = max(1, int(1.6 * self.s + 0.4))    # размер «пикселя» шрифта: 2 при 100–150%, 3 при 175–200%
         self.root.title("@ufltRP")
         self.root.configure(bg="#0e0d10")
         self.root.geometry(f"{self.px(W)}x{self.px(H)}")
@@ -326,6 +331,7 @@ class App:
         self.java_ver = ver if ver in porter.JAVA_VERSIONS else porter.DEFAULT_VERSION
         self.bump = bool(st.get("bump", True))
         self._imgs = {}            # ссылки на PhotoImage, чтобы их не собрал сборщик мусора
+        self._max_w = {}           # предельная ширина надписей
         self._anim, self._glint_pil = {}, {}
         self.hovering = False
 
@@ -361,15 +367,19 @@ class App:
         return ph
 
     def label(self, key, x, y, text, size=8, color=TEXT, bold=False, anchor="center", tags=(),
-              passive=False):
+              passive=False, max_w=None):
         """Пиксельная надпись (картинка на canvas). passive — не перехватывает мышь."""
-        img = self.photo(("lbl", key), pixel_text(text, size >= 12, self.k, color, bold))
+        self._max_w[key] = max_w
+        img = self.photo(("lbl", key), pixel_text(text, size >= 12, self.k, color, bold,
+                                                  max_w=self.px(max_w) if max_w else None))
         return self.canvas.create_image(self.px(x), self.px(y), image=img, anchor=anchor,
                                         tags=tuple(tags) + (("passive",) if passive else ()),
                                         state="disabled" if passive else "normal")
 
     def set_label(self, key, iid, text, size=8, color=TEXT, bold=False):
-        self.canvas.itemconfig(iid, image=self.photo(("lbl", key), pixel_text(text, size >= 12, self.k, color, bold)))
+        mw = self._max_w.get(key)
+        self.canvas.itemconfig(iid, image=self.photo(("lbl", key), pixel_text(
+            text, size >= 12, self.k, color, bold, max_w=self.px(mw) if mw else None)))
 
     def bind(self, tag, enter, leave, click):
         self.canvas.tag_bind(tag, "<Enter>", enter)
@@ -418,8 +428,8 @@ class App:
         self.dash_id = self.canvas.create_image(self.px(x0), self.px(y0), anchor="nw",
                                                 image=self.photo("dash", _colored(dash, (255, 255, 255, 225))))
         _, ty0, _, _ = TITLE
-        self.title_id = self.label("title", W / 2, ty0 + 28, "", 12, TEXT)
-        self.sub_id = self.label("sub", W / 2, ty0 + 58, "", 9, MUTED)
+        self.title_id = self.label("title", W / 2, ty0 + 28, "", 12, TEXT, max_w=TITLE[2] - TITLE[0] - 28)
+        self.sub_id = self.label("sub", W / 2, ty0 + 58, "", 9, MUTED, max_w=TITLE[2] - TITLE[0] - 28)
 
     def set_hover(self, on, cursor=None):
         if cursor is not None:
@@ -458,7 +468,8 @@ class App:
             tag = f"mode_{key}"
             iid = self.canvas.create_image(self.px(x), self.px(y0 + pad), image=imgs["idle"],
                                            anchor="nw", tags=tag)
-            lid = self.label(f"mode_{key}", x + w / 2, y0 + pad + hh / 2, text, 9, TEXT, passive=True)
+            lid = self.label(f"mode_{key}", x + w / 2, y0 + pad + hh / 2, text, 9, TEXT, passive=True,
+                             max_w=w - 12)
             self.mode_items[key] = (iid, lid, imgs, (x, y0 + pad, w, hh), text)
             self.bind(tag, lambda e, k=key: self.mode_hover(k, True),
                       lambda e, k=key: self.mode_hover(k, False), lambda e, k=key: self.set_mode(k))
@@ -496,7 +507,7 @@ class App:
     def show_hint(self):
         sub = TEXTS[self.mode][1]
         if self.mode == "java" and not vanilla.find_jar(self.java_ver, self.mc_dir):
-            sub += f"  ·  {self.java_ver} нет в .minecraft"
+            sub += f"  ·  нет клиента {self.java_ver}"
         else:
             sub += HINT
         self.set_status(sub, MUTED)
@@ -507,9 +518,10 @@ class App:
         r1, r2 = y0 + 24, y0 + 62
 
         # цвет описания: кнопка с текущим цветом, по клику — список
-        self.label("color_cap", 44, r1, "Цвет", 9, MUTED, anchor="w")
-        self.color_btn_pos = (96, r1)
-        self.color_btn = self.canvas.create_image(self.px(96), self.px(r1), anchor="w", tags="color_btn")
+        cap = self.label("color_cap", 44, r1, "Цвет", 9, MUTED, anchor="w")
+        bx = 44 + self._imgs[("lbl", "color_cap")].width() / self.s + 10
+        self.color_btn_pos = (bx, r1)
+        self.color_btn = self.canvas.create_image(self.px(bx), self.px(r1), anchor="w", tags="color_btn")
         self.bind("color_btn", lambda e: self.color_btn_hover(True), lambda e: self.color_btn_hover(False),
                   lambda e: self.toggle_popup())
         self.draw_color_btn(False)
@@ -534,25 +546,29 @@ class App:
         # строка режима
         self.label("ver_cap", 44, r2, "Версия", 9, MUTED, anchor="w", tags=("row_java",))
         self.ver_items = {}
-        vx = 120
+        vx = 44 + self._imgs[("lbl", "ver_cap")].width() / self.s + 10
+        texts = {v: pixel_text(v, False, self.k, TEXT).width / self.s for v in porter.JAVA_VERSIONS}
+        room = 556 - vx - 5 * len(texts)                  # сколько места до правого края
+        pad_x = max(6, min(18, (room - sum(texts.values())) / len(texts)))
         for ver in porter.JAVA_VERSIONS:
-            w = 20 + len(ver) * 7.4
+            w = texts[ver] + pad_x
             imgs = {k: self.photo(f"ver_{ver}_{k}", pill(self.px(w), self.px(24), self.px(1), k))
                     for k in ("idle", "hover", "active")}
             tag = f"ver_{ver}"
             iid = self.canvas.create_image(self.px(vx), self.px(r2 - 12), image=imgs["idle"],
                                            anchor="nw", tags=(tag, "row_java"))
             lid = self.label(f"ver_{ver}", vx + w / 2, r2, ver, 9, TEXT, tags=("row_java",),
-                             passive=True)
+                             passive=True, max_w=w - 4)
             self.ver_items[ver] = (iid, lid, imgs)
             self.bind(tag, lambda e, v=ver: self.ver_hover(v, True),
                       lambda e, v=ver: self.ver_hover(v, False), lambda e, v=ver: self.set_ver(v))
-            vx += w + 6
+            vx += w + 5
         self.refresh_versions()
 
         self.label("bedrock_cap", W / 2, r2, "Подойдёт .zip, .mcpack или распакованная папка", 9, MUTED,
-                   tags=("row_bedrock",))
-        self.label("desc_cap", 44, r2, "Повысить версию пака", 9, MUTED, anchor="w", tags=("row_desc",))
+                   tags=("row_bedrock",), max_w=PANEL[2] - PANEL[0] - 40)
+        self.label("desc_cap", 44, r2, "Повысить версию пака", 9, MUTED, anchor="w", tags=("row_desc",),
+                   max_w=420)
         self.toggle_imgs = {k: self.photo(f"tg_{k}", self.toggle_img(k)) for k in (True, False)}
         self.toggle_id = self.canvas.create_image(self.px(556), self.px(r2), anchor="e",
                                                   image=self.toggle_imgs[self.bump],
