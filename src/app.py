@@ -11,8 +11,11 @@ from tkinter import filedialog, ttk
 from PIL import Image, ImageDraw, ImageTk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+import json
+
 import core
 import porter
+import vanilla
 
 W, H = 560, 560
 ZONE = (36, 36, W - 36, 440)      # область "перетащи сюда"
@@ -56,7 +59,7 @@ def make_background() -> Image.Image:
 class App:
     def __init__(self):
         self.root = TkinterDnD.Tk()
-        self.root.title("Пак-тулза — @ufltRP")
+        self.root.title("@ufltRP")
         self.root.geometry(f"{W}x{H}")
         self.root.resizable(False, False)
         try:
@@ -66,7 +69,9 @@ class App:
 
         self.busy = False
         self.last_dir = None
-        self.mode = tk.StringVar(value="bedrock")
+        self.settings = self.load_settings()   # при первом запуске — значения по умолчанию
+        self.mc_dir = self.settings.get("mc_dir")
+        self.mode = tk.StringVar(value=self.settings.get("mode", "desc"))
         self.bg = ImageTk.PhotoImage(make_background())
 
         self.canvas = tk.Canvas(self.root, width=W, height=H, highlightthickness=0,
@@ -77,7 +82,7 @@ class App:
                                      tags="border")
 
         cx = W // 2
-        title, sub = TEXTS["bedrock"]
+        title, sub = TEXTS[self.mode.get()]
         self.text(cx, 66, title, 22, "bold", tag="title")
         self.text(cx, 98, sub, 11, tag="subtitle")
         self.status_id = self.text(cx, 478, "Готов к работе", 12, color="#dddddd",
@@ -127,9 +132,12 @@ class App:
         # цвет описания — во всех режимах
         tk.Label(self.bar, text="Цвет:", bg=bg, fg="white",
                  font=(FONT, 10)).pack(side="left", padx=(0, 4))
-        self.color = tk.StringVar(value="Радуга")
-        ttk.Combobox(self.bar, textvariable=self.color, values=list(core.COLORS),
-                     state="readonly", width=9).pack(side="left", padx=(0, 10))
+        color = self.settings.get("color", "Радуга")
+        self.color = tk.StringVar(value=color if color in core.COLORS else "Радуга")
+        color_box = ttk.Combobox(self.bar, textvariable=self.color, values=list(core.COLORS),
+                                 state="readonly", width=9)
+        color_box.pack(side="left", padx=(0, 8))
+        color_box.bind("<<ComboboxSelected>>", lambda e: self.save_settings())
 
         # дополнительные опции — зависят от режима
         self.extra = tk.Frame(self.bar, bg=bg)
@@ -148,16 +156,21 @@ class App:
         self.extra_java = tk.Frame(self.extra, bg=bg)
         tk.Label(self.extra_java, text="Java:", bg=bg, fg="white",
                  font=(FONT, 10)).pack(side="left", padx=(0, 4))
-        self.java_ver = tk.StringVar(value=porter.DEFAULT_VERSION)
-        ttk.Combobox(self.extra_java, textvariable=self.java_ver,
-                     values=list(porter.JAVA_VERSIONS), state="readonly",
-                     width=8).pack(side="left", padx=(0, 8))
+        ver = self.settings.get("java_version", porter.DEFAULT_VERSION)
+        self.java_ver = tk.StringVar(value=ver if ver in porter.JAVA_VERSIONS else porter.DEFAULT_VERSION)
+        ver_box = ttk.Combobox(self.extra_java, textvariable=self.java_ver,
+                               values=list(porter.JAVA_VERSIONS), state="readonly", width=8)
+        ver_box.pack(side="left", padx=(0, 6))
+        ver_box.bind("<<ComboboxSelected>>", lambda e: (self.save_settings(),
+                                                        self.set_status(self.ready_text())))
         tk.Button(self.extra_java, text="Папка…", command=self.pick_folder,
+                  font=(FONT, 10)).pack(side="left", padx=(0, 4))
+        tk.Button(self.extra_java, text=".minecraft…", command=self.pick_mc_dir,
                   font=(FONT, 10)).pack(side="left")
 
         self.open_btn = tk.Button(self.bar, text="Открыть папку", state="disabled",
                                   command=self.open_folder, font=(FONT, 10))
-        self.open_btn.pack(side="left", padx=(10, 0))
+        self.open_btn.pack(side="left", padx=(8, 0))
         self.canvas.create_window(W // 2, 516, window=self.bar)
 
     def on_mode(self):
@@ -169,7 +182,42 @@ class App:
             f.pack_forget()
         {"desc": self.extra_desc, "bedrock": self.extra_bedrock,
          "java": self.extra_java}[mode].pack()
-        self.set_status("Готов к работе")
+        self.set_status(self.ready_text())
+        self.save_settings()
+
+    def ready_text(self):
+        if self.mode.get() != "java":
+            return "Готов к работе"
+        jar = vanilla.find_jar(self.java_ver.get(), self.mc_dir)
+        if jar:
+            return f"Готов. Ванильные текстуры: {jar.name}"
+        return (f"Готов. Minecraft {self.java_ver.get()} не найден — недостающее будет заглушками "
+                "(кнопка «.minecraft…»)")
+
+    # ---------- настройки ----------
+    def load_settings(self):
+        try:
+            return json.loads(vanilla.settings_path().read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def save_settings(self):
+        try:
+            path = vanilla.settings_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "mode": self.mode.get(), "color": self.color.get(),
+                "java_version": self.java_ver.get(), "mc_dir": self.mc_dir,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def pick_mc_dir(self):
+        folder = filedialog.askdirectory(title="Выберите папку .minecraft (с папкой versions)")
+        if folder:
+            self.mc_dir = folder
+            self.save_settings()
+            self.set_status(self.ready_text())
 
     def set_status(self, s, color="#dddddd"):
         self.canvas.itemconfig(self.status_id, text=s, fill=color)
@@ -209,6 +257,7 @@ class App:
         if self.busy:
             return
         self.busy = True
+        self.save_settings()
         self.set_status("Обработка…", "#ffd23f")
         mode = self.mode.get()
         color, bump, ver = self.color.get(), self.bump.get(), self.java_ver.get()
@@ -222,7 +271,7 @@ class App:
                         dst = core.process(p, color, True, bump)
                         results.append((Path(p), dst, None, None))
                     else:
-                        res = porter.port_pack(p, mode, ver, description)
+                        res = porter.port_pack(p, mode, ver, description, self.mc_dir)
                         results.append((Path(p), res.dst, None, res))
                 except Exception as e:  # noqa: BLE001
                     results.append((Path(p), None, str(e), None))

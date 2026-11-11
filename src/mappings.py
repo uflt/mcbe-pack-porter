@@ -181,6 +181,31 @@ POTIONS_JAVA_TO_BEDROCK = {
 }
 
 
+# Частицы. Атлас Bedrock textures/particle/particles.png (128x128, 16x16 ячеек) устроен так же,
+# как старый атлас Java до 1.13. В новых версиях Java каждая частица — отдельный файл.
+# имя файла в Java -> (колонка, строка) ячейки атласа.
+def _particle_cells():
+    c = {}
+    for i in range(8):
+        c[f"generic_{i}"] = (i, 0)    # дым, редстоун и т.п. (0 — самая мелкая, 7 — крупная)
+        c[f"effect_{i}"] = (i, 8)     # вихри зелий
+        c[f"spark_{i}"] = (i, 10)     # искры фейерверка
+    for i in range(4):
+        c[f"splash_{i}"] = (3 + i, 1)  # брызги воды
+    c.update({"bubble": (0, 2), "flame": (0, 3), "lava": (1, 3), "note": (0, 4),
+              "heart": (0, 5), "drip_hang": (0, 7), "drip_fall": (1, 7),
+              "drip_land": (2, 7)})
+    return c
+
+
+PARTICLE_CELLS = _particle_cells()
+# частицы удара — в Java-паках их убираем (делаем прозрачными)
+HIT_PARTICLES = ("critical_hit", "enchanted_hit", "damage")
+CRIT_CELL = (1, 4)   # удар/крит в старом атласе (Java до 1.13)
+
+BEDROCK_POTION_FILES = {"potion_bottle_drinkable", "potion_bottle_splash", "potion_bottle_lingering"}
+
+
 def _build_blocks():
     m = {}
     for j, b in COLORS:
