@@ -395,7 +395,14 @@ def _bedrock_to_java(src: Source, base: Path, version_label: str, desc: str, mc_
                     return parts.open_img(d)
             return None
 
-        out.update(_safe(res, "интерфейс", parts.hud_to_java, ui, cfg, van, res))
+        ui_names = sorted({os.path.splitext(r[len("textures/ui/"):])[0] for r in src.files
+                           if r.lower().startswith("textures/ui/")
+                           and r.lower().endswith((".png", ".tga"))})
+
+        def gui(n):
+            return src.get(f"textures/gui/{n}.png")
+
+        out.update(_safe(res, "интерфейс", parts.hud_to_java, ui, cfg, van, res, ui_names, gui))
         if potions:
             out.update(_safe(res, "зелья", parts.potions_to_java, potions, cfg, res))
         atlas = src.get("textures/particle/particles.png")

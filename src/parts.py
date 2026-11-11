@@ -276,6 +276,68 @@ def _inv_layout(legacy: bool):
     return slots, result, arrow
 
 
+def _classify_heart(name):
+    """Определяет вид сердца по имени файла (heart_half_blink, poison_heart и т.п.)."""
+    n = name.lower()
+    if "heart" not in n or any(w in n for w in ("hardcore", "frozen", "freeze", "horse", "mount",
+                                                 "vehicle", "boss", "health_boost")):
+        return None
+    if any(w in n for w in ("background", "container", "empty", "outline", "border", "_bg")):
+        return "heart_container_blink" if ("blink" in n or "flash" in n) else "heart_container"
+    kind = ("poison" if "poison" in n else "wither" if "wither" in n
+            else "absorb" if "absor" in n or "gold" in n else "")
+    half = "half" in n
+    blink = "blink" in n or "flash" in n
+    if kind:
+        return f"heart_{kind}_{'half' if half else 'full'}"
+    if blink:
+        return "heart_half_blink" if half else "heart_full_blink"
+    return "heart_half" if half else "heart_full"
+
+
+def _classify_hud(name):
+    """Сердца, еда, броня, воздух, опыт — по смыслу имени файла."""
+    base = name.lower().rsplit("/", 1)[-1]
+    if base.endswith("_effect") or base in ("hunger_effect", "absorption_effect"):
+        return None          # это иконки эффектов, не HUD
+    heart = _classify_heart(base)
+    if heart:
+        return heart
+    if any(w in base for w in ("hunger", "food", "drumstick", "meat")):
+        if any(w in base for w in ("horse", "mount", "saturation_bar")):
+            return None
+        hunger = "effect" in base or "poison" in base or "rotten" in base
+        if any(w in base for w in ("background", "empty", "container", "outline", "_bg")):
+            return "food_hunger_empty" if hunger else "food_empty"
+        part = "half" if "half" in base else "full"
+        return f"food_hunger_{part}" if hunger else f"food_{part}"
+    if "armor" in base and "slot" not in base and "stand" not in base and "trim" not in base:
+        if any(w in base for w in ("empty", "background", "container", "outline", "_bg")):
+            return "armor_empty"
+        return "armor_half" if "half" in base else "armor_full"
+    if "bubble" in base or "oxygen" in base or base in ("air", "air_full"):
+        return "air_pop" if any(w in base for w in ("pop", "burst", "empty")) else "air"
+    if ("experience" in base or base.startswith("xp")) and "nub" not in base:
+        if "empty" in base or "background" in base:
+            return "xp_empty"
+        if "full" in base or "progress" in base:
+            return "xp_full"
+    return None
+
+
+def find_hud(ui_names, ui):
+    """Все элементы HUD, которые удалось опознать по именам файлов в textures/ui."""
+    found = {}
+    # короткие имена важнее (heart лучше heart_new_v2), файлы в корне ui — важнее подпапок
+    for name in sorted(ui_names, key=lambda n: (n.count("/"), len(n))):
+        key = _classify_hud(name)
+        if key and key not in found:
+            img = ui(name)
+            if img is not None:
+                found[key] = img
+    return found
+
+
 def _ui_lookup(ui, names):
     for n in names:
         img = ui(n)
@@ -346,10 +408,31 @@ def _draw_inventory(canvas, s, legacy, panel, slot, arrow):
                            (arrow_pos[0] * s, arrow_pos[1] * s))
 
 
-def hud_to_java(ui, cfg, vanilla, res):
+def _from_bedrock_atlas(gui, pieces):
+    """Старые Bedrock-паки: textures/gui/icons.png (раскладка как у Java) и gui/gui.png (хотбар)."""
+    for atlas_name, keys in (("icons", [k for k in HUD if HUD[k][0] == "icons"]),
+                             ("gui", ["hotbar", "hotbar_selection"])):
+        data = gui(atlas_name)
+        if not data:
+            continue
+        atlas = open_img(data)
+        s = max(1, atlas.width // 256)
+        for k in keys:
+            if k in pieces:
+                continue
+            u, v, w, h = HUD[k][1]
+            if (v + h) * s > atlas.height:
+                continue
+            img = atlas.crop((u * s, v * s, (u + w) * s, (v + h) * s))
+            if img.getbbox() is not None:
+                pieces[k] = img
+
+
+def hud_to_java(ui, cfg, vanilla, res, ui_names=(), gui=None):
     """
     Интерфейс Bedrock (textures/ui) -> Java.
     ui(name) -> Image|None. cfg: настройки версии. vanilla: Vanilla|None. res: PortResult.
+    ui_names — все имена файлов в textures/ui; gui(name) -> bytes|None для textures/gui/<name>.png.
     """
     out = {}
     legacy, sprites, fmt = cfg.get("legacy", False), cfg["fmt"] >= 18, cfg["fmt"]
@@ -359,6 +442,19 @@ def hud_to_java(ui, cfg, vanilla, res):
         img = _ui_lookup(ui, names)
         if img is not None:
             pieces[key] = img
+    for key, img in find_hud(ui_names, ui).items():
+        pieces.setdefault(key, img)
+    if gui:
+        _from_bedrock_atlas(gui, pieces)
+    for label, prefix in (("Сердца", "heart_"), ("Еда", "food_")):
+        got = sorted(k for k in pieces if k.startswith(prefix))
+        if got:
+            res.notes.append(f"{label}: перенесено " + ", ".join(got) + ".")
+        else:
+            res.notes.append(f"{label}: в паке не найдены.")
+    if not any(k.startswith(("heart_", "food_")) for k in pieces):
+        res.notes.append("Все файлы в textures/ui (пришлите этот список, если сердца/еда не перенеслись): "
+                         + (", ".join(ui_names) if ui_names else "папки textures/ui нет") + ".")
     parts = {n: ui(n) for n in HOTBAR_NAMES}
     if all(p is not None for p in parts.values()):
         pieces["hotbar"] = _compose_hotbar(parts)
@@ -668,29 +764,47 @@ def sky_to_bedrock(files, read):
         props = sorted((n for n in files if n.startswith(folder) and n.endswith(".properties")
                         and n[len(folder):].startswith("sky")),
                        key=lambda n: int("".join(ch for ch in n[len(folder):] if ch.isdigit()) or 0))
+        lower = {n.lower(): n for n in files}
         candidates = []
         for p in props:
-            src = _props(read(p).decode("utf-8", "ignore")).get("source", "")
+            src = _props(read(p).decode("utf-8", "ignore")).get("source", "").replace("\\", "/")
             name = p[:-len(".properties")] + ".png"
             if src:
+                src = src.split(":", 1)[-1] if ":" in src else src
                 if src.startswith("./"):
                     name = folder + src[2:]
+                elif "/" not in src:
+                    name = folder + src
+                elif src.startswith("assets/"):
+                    name = src
                 else:
-                    src = src.split(":", 1)[-1]
-                    name = src if src.startswith("assets/") else "assets/minecraft/" + src
+                    name = "assets/minecraft/" + src
+                if not name.lower().endswith(".png"):
+                    name += ".png"
             candidates.append(name)
-        candidates.append(folder + "sky1.png")
-        for name in candidates:
-            if name in files:
-                img = open_img(read(name))
-                if abs(img.width * 2 - img.height * 3) > img.width // 10:
-                    continue   # не 3x2
-                f = img.width // 3
-                out = {}
-                for idx, col, row in SKY_LAYOUT:
-                    out[f"textures/environment/overworld_cubemap/cubemap_{idx}.png"] = to_png(
-                        img.crop((col * f, row * f, (col + 1) * f, (row + 1) * f)))
-                return out
+        candidates += [n for n in files if n.startswith(folder) and n.lower().endswith(".png")]
+        best, best_score = None, -1
+        for name in dict.fromkeys(candidates):
+            real = lower.get(name.lower())
+            if not real:
+                continue
+            img = open_img(read(real))
+            if img.width < 3 or abs(img.width * 2 - img.height * 3) > img.width // 10:
+                continue   # не 3x2
+            # основной слой — самый непрозрачный и светлый (а не звёзды/облака поверх)
+            small = img.resize((48, 32))
+            score = sum(a * (r + g + b) for r, g, b, a in small.getdata())
+            if score > best_score:
+                best, best_score = img, score
+        if best is not None:
+            f = best.width // 3
+            out = {}
+            for idx, col, row in SKY_LAYOUT:
+                face = best.crop((col * f, row * f, (col + 1) * f, (row + 1) * f))
+                bg = Image.new("RGBA", face.size, (0, 0, 0, 255))   # в Bedrock грань непрозрачная
+                out[f"textures/environment/overworld_cubemap/cubemap_{idx}.png"] = to_png(
+                    Image.alpha_composite(bg, face))
+            return out
     return {}
 
 
@@ -720,25 +834,36 @@ def is_potion_name(stem: str) -> bool:
     return s.startswith("potion_bottle_") and s != "potion_bottle_empty"
 
 
+def _is_outline(px):
+    r, g, b, a = px
+    _, ss, vv = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+    return vv < 0.28 or (ss < 0.18 and vv < 0.9)   # тёмный контур, серое/белое стекло, блик
+
+
 def _split_potion(base, variants):
     """Цельная бутылка Bedrock -> (бутылка с дыркой, серая жидкость для окраски игрой)."""
     w, h = base.size
     bp = base.load()
     mask = set()
-    for v in variants:
-        vp = fit(v, w, h).load()
+    if variants:
+        vps = [fit(v, w, h).load() for v in variants]
+        need = max(1, (len(vps) + 1) // 2)       # меняется хотя бы у половины эффектов
         for y in range(h):
             for x in range(w):
-                a, b = bp[x, y], vp[x, y]
-                if a[3] and sum(abs(a[i] - b[i]) for i in range(3)) > 24:
+                a = bp[x, y]
+                if not a[3] or _is_outline(a):
+                    continue
+                changed = sum(1 for vp in vps
+                              if sum(abs(a[i] - vp[x, y][i]) for i in range(3)) > 60)
+                if changed >= need:
                     mask.add((x, y))
     if not mask:   # вариантов нет — ищем «синюю воду»
         for y in range(h):
             for x in range(w):
                 r, g, b, a = bp[x, y]
-                if a:
+                if a and not _is_outline((r, g, b, a)):
                     hh, ss, vv = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
-                    if 0.53 <= hh <= 0.72 and ss > 0.25 and vv > 0.2:
+                    if 0.53 <= hh <= 0.72 and ss > 0.3:
                         mask.add((x, y))
     bottle = base.copy()
     overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
